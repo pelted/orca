@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef } from 'react'
+import { useEffect, useCallback, useRef, useState } from 'react'
 import { AppState } from 'react-native'
 import { useFocusEffect } from 'expo-router'
 import { useMobileDictation } from '../hooks/use-mobile-dictation'
@@ -21,6 +21,10 @@ import { mobileNativeChatScopeKey } from './mobile-native-chat-scope-key'
 import { isMobileNativeChatAgentConfirmed } from './mobile-native-chat-eligibility'
 import { useMobileSendCompletionGeneration } from './use-mobile-send-completion-generation'
 import type { MobileSessionFeedbackCapabilitiesModel } from './use-mobile-session-feedback-capabilities'
+import {
+  createMobileDictationAutoSend,
+  resolveMobileDictationAutoSendDelayMs
+} from './mobile-dictation-auto-send'
 
 export function useMobileSessionNativeChatDictation(
   scope: MobileSessionFeedbackCapabilitiesModel,
@@ -120,6 +124,13 @@ export function useMobileSessionNativeChatDictation(
     [setShowDictationSetup, showToast]
   )
 
+  // The host's "Send when dictation ends" setting, read with the dictation mode.
+  const autoSendSettingRef = useRef({
+    enabled: false,
+    delayMs: resolveMobileDictationAutoSendDelayMs(undefined)
+  })
+  const [dictationAutoSend] = useState(createMobileDictationAutoSend)
+
   const dictationTargetReady = showNativeChat ? connState === 'connected' : canSend
   const dictation = useMobileDictation({
     client,
@@ -131,6 +142,9 @@ export function useMobileSessionNativeChatDictation(
           appendBufferedDictation(current, text)
         )
         showToast('Dictation inserted')
+        if (autoSendSettingRef.current.enabled) {
+          dictationAutoSend.startIfArmed(autoSendSettingRef.current.delayMs)
+        }
         return
       }
       // Live mode inserts the transcript into its PTY as text (no Return); buffered mode appends to the command field.
@@ -167,6 +181,9 @@ export function useMobileSessionNativeChatDictation(
   })
 
   const startDictation = useCallback(() => {
+    // Why: new speech appends to the same draft; its own transcript starts a fresh countdown.
+    dictationAutoSend.withdraw()
+    dictationAutoSend.arm()
     const routeContext = activeHandle
       ? { handle: activeHandle, liveInputEnabled: liveInputTerminalHandles.has(activeHandle) }
       : null
@@ -177,12 +194,18 @@ export function useMobileSessionNativeChatDictation(
       }
       reportDictationFailure(err)
     })
-  }, [activeHandle, dictation, liveInputTerminalHandles, reportDictationFailure])
+  }, [activeHandle, dictation, dictationAutoSend, liveInputTerminalHandles, reportDictationFailure])
 
   const cancelDictation = useCallback(() => {
     dictationRouteContextRef.current = null
+    dictationAutoSend.withdraw()
     void dictation.cancel()
-  }, [dictation])
+  }, [dictation, dictationAutoSend])
+
+  // Why: a transcript still in flight must not send into a chat other than the one dictated into.
+  useEffect(() => {
+    dictationAutoSend.withdraw()
+  }, [dictationAutoSend, nativeChatScopeKey])
 
   // Toggle mode: one tap starts, the next stops; long-press cancels mid-record.
   const handleDictationToggle = useCallback(() => {
@@ -224,6 +247,10 @@ export function useMobileSessionNativeChatDictation(
       if (read === dictationSettingsReadRef.current) {
         setDictationMode(setup.dictationMode)
         setDictationEnabled(setup.enabled !== false)
+        autoSendSettingRef.current = {
+          enabled: setup.autoSendAfterDictation === true,
+          delayMs: resolveMobileDictationAutoSendDelayMs(setup.autoSendDelayMs)
+        }
       }
     } catch {
       // Keep the last settings when an older host cannot report them.
@@ -236,14 +263,18 @@ export function useMobileSessionNativeChatDictation(
       const subscription = AppState.addEventListener('change', (state) => {
         if (state === 'active') {
           void refreshDictationMode()
+        } else {
+          // Why: a backgrounded or locked phone is the user walking away, not consenting to send.
+          dictationAutoSend.withdraw()
         }
       })
       return () => {
+        dictationAutoSend.withdraw()
         // Late replies from a retired connection or focus must not rebind the mic.
         dictationSettingsReadRef.current += 1
         subscription.remove()
       }
-    }, [refreshDictationMode])
+    }, [dictationAutoSend, refreshDictationMode])
   )
 
   useEffect(() => {
@@ -270,7 +301,8 @@ export function useMobileSessionNativeChatDictation(
     handleDictationToggle,
     handleDictationPressIn,
     handleDictationPressOut,
-    refreshDictationMode
+    refreshDictationMode,
+    dictationAutoSend
   }
 }
 

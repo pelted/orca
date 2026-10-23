@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { getDefaultVoiceSettings } from '../../shared/constants'
+import { createGlobalSettingsFixture } from '../../shared/global-settings-test-fixture'
 import type { VoiceSettings } from '../../shared/speech-types'
+import type { RuntimeStore } from './runtime-store-contract'
 
 vi.mock('../speech/speech-runtime-service', () => ({
   getSpeechModelManager: () => ({ getModelStates: async () => [] }),
@@ -11,9 +13,12 @@ vi.mock('../speech/stt-worker-paths', () => ({ hasLocalSpeechRecognizer: () => t
 const { RuntimeMobileSpeechCatalog } = await import('./runtime-mobile-speech-catalog')
 
 function catalogWith(voice: Partial<VoiceSettings>) {
-  const store = { getSettings: () => ({ voice: { ...getDefaultVoiceSettings(), ...voice } }) }
-  // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: list() reads only getSettings, and the model manager is mocked above.
-  return new RuntimeMobileSpeechCatalog(() => store as never)
+  const store: Pick<RuntimeStore, 'getSettings'> = {
+    getSettings: () =>
+      createGlobalSettingsFixture({ voice: { ...getDefaultVoiceSettings(), ...voice } })
+  }
+  // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: list() reads only getSettings, which the Pick checks; the model manager is mocked above.
+  return new RuntimeMobileSpeechCatalog(() => store as RuntimeStore)
 }
 
 // The phone follows the desktop's "Send when dictation ends" through the setup reply.

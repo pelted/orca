@@ -207,6 +207,13 @@ export function useMobileSessionNativeChatDictation(
     dictationAutoSend.withdraw()
   }, [dictationAutoSend, nativeChatScopeKey])
 
+  // Why: dictation stops when the connection drops, so a reconnect must not resume its send.
+  useEffect(() => {
+    if (connState !== 'connected') {
+      dictationAutoSend.withdraw()
+    }
+  }, [connState, dictationAutoSend])
+
   // Toggle mode: one tap starts, the next stops; long-press cancels mid-record.
   const handleDictationToggle = useCallback(() => {
     if (dictation.isProcessing) {

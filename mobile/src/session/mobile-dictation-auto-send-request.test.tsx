@@ -1,18 +1,25 @@
 /**
  * The session's half of "Send when dictation ends": a chat transcript starts the countdown only
- * when the desktop's setup reply turned the setting on, dictating again cancels it, and a
- * transcript that arrives after the user left the screen, the app or the chat stays a draft.
+ * when the desktop's setup reply turned the setting on; dictating again, a dropped connection, or
+ * leaving the screen, the app or the chat cancels it; and the next dictation still sends.
  *
- * Mounts the real `useMobileSessionNativeChatDictation` over the real `useMobileDictation`, with a
- * desktop that answers the setup read, the start and a finish carrying the transcript.
+ * Mounts the real `useMobileSessionNativeChatDictation` over the real `useMobileDictation`, with the
+ * real chat resolution deciding chat versus terminal and a desktop that answers each request in turn.
  */
-import { createElement, useRef } from 'react'
+import { createElement, useRef, useState } from 'react'
 import { act, create, type ReactTestRenderer } from 'react-test-renderer'
-import { describe, expect, it, vi } from 'vitest'
-import { createFakeRpcClient, type FakeRpcClient } from '../mobile-web-shell/bridge-host-test-fakes'
-import type * as NativeChatSendError from './use-mobile-native-chat-send-error'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  createFakeRpcClient,
+  type FakeRpcClient,
+  type SentRequest
+} from '../mobile-web-shell/bridge-host-test-fakes'
+import { resolveMobileTerminalInputGate } from '../terminal/terminal-input-connection-gate'
+import type { MobileSessionFeedbackCapabilitiesModel } from './use-mobile-session-feedback-capabilities'
+import type { MobileSessionTab } from './mobile-session-route-types'
+import type { ConnectionState } from '../transport/types'
+import { structuredAgentSessionHostSupport } from './mobile-structured-agent-session-host-support'
 
-// The screen's lifecycle, driven by the tests: the app's foreground state and the route's focus.
 type ScreenLifecycle = {
   appStateListener: ((state: string) => void) | null
   blur: (() => void) | null
@@ -21,7 +28,6 @@ const lifecycle = vi.hoisted((): ScreenLifecycle => ({ appStateListener: null, b
 
 vi.mock('react-native', () => ({
   AppState: {
-    currentState: 'active',
     addEventListener: (_event: string, listener: (state: string) => void) => {
       lifecycle.appStateListener = listener
       return { remove: () => {} }
@@ -31,14 +37,14 @@ vi.mock('react-native', () => ({
 }))
 vi.mock('@orca/expo-two-way-audio', () => ({
   addExpoTwoWayAudioEventListener: () => ({ remove: () => {} }),
-  initialize: () => Promise.resolve(true),
-  requestMicrophonePermissionsAsync: () => Promise.resolve({ granted: true }),
+  initialize: async () => true,
+  requestMicrophonePermissionsAsync: async () => ({ granted: true }),
   tearDown: () => {},
   toggleRecording: () => true
 }))
 vi.mock('expo-keep-awake', () => ({
-  activateKeepAwakeAsync: () => Promise.resolve(),
-  deactivateKeepAwake: () => Promise.resolve()
+  activateKeepAwakeAsync: async () => {},
+  deactivateKeepAwake: async () => {}
 }))
 // Runs the focus effect like a focused screen, so the hook reads the desktop's setup on mount, and
 // keeps its cleanup so a test can blur the screen.
@@ -54,16 +60,6 @@ vi.mock('expo-router', async () => {
   }
 })
 vi.mock('../platform/haptics', () => ({ triggerError: () => {} }))
-vi.mock('./use-mobile-native-chat-send-error', async (importOriginal) => ({
-  ...(await importOriginal<typeof NativeChatSendError>()),
-  useMobileNativeChatSendError: () => ({
-    message: null,
-    show: () => {},
-    clear: () => {},
-    keepWhile: () => {},
-    bannerMountedRef: { current: false }
-  })
-}))
 vi.mock('./use-mobile-native-chat-readability', () => ({
   useMobileNativeChatReadability: () => true
 }))
@@ -76,165 +72,276 @@ vi.mock('./use-mobile-native-chat-input-lease', () => ({
     clear: () => {}
   })
 }))
-vi.mock('./use-mobile-native-chat-controller', () => ({
-  useMobileNativeChatController: () => ({
-    nativeChatSession: { messages: [] },
-    toggleTabChatView: () => {},
-    showNativeChat: true,
-    showNativeChatRef: { current: true },
-    setChatComposerText: () => {}
+vi.mock('./use-mobile-session-view-mode', () => ({
+  useMobileSessionViewMode: () => ({
+    ready: true,
+    isTabChatView: () => false,
+    setTabView: () => {},
+    toggleTabChatView: () => {}
   })
 }))
+vi.mock('./use-mobile-native-chat-controller', async () => {
+  const { useMobileNativeChatActiveResolution } =
+    await import('./use-mobile-native-chat-active-resolution')
+  return {
+    useMobileNativeChatController: (
+      args: Parameters<typeof useMobileNativeChatActiveResolution>[0]
+    ) => {
+      const resolution = useMobileNativeChatActiveResolution(args)
+      const [chatComposerText, setChatComposerText] = useState('Draft')
+      return {
+        ...resolution,
+        nativeChatSession: { messages: [] },
+        nativeChatCommandRefusalCauses: null,
+        chatComposerText,
+        setChatComposerText
+      }
+    }
+  }
+})
 vi.mock('./use-mobile-send-completion-generation', () => ({
   useMobileSendCompletionGeneration: () => () => 0
 }))
 
 import { useMobileSessionNativeChatDictation } from './use-mobile-session-native-chat-dictation'
 
-type Model = ReturnType<typeof useMobileSessionNativeChatDictation>
+type SessionScope = Pick<
+  MobileSessionFeedbackCapabilitiesModel,
+  | 'hostId'
+  | 'worktreeId'
+  | 'client'
+  | 'connState'
+  | 'agentSessionHostSupport'
+  | 'setInput'
+  | 'liveInputTerminalHandles'
+  | 'activeHandle'
+  | 'activeSessionTabId'
+  | 'activeSessionTab'
+  | 'diffComments'
+  | 'diffCommentsRef'
+  | 'setShowDictationSetup'
+  | 'setDictationMode'
+  | 'dictationEnabled'
+  | 'setDictationEnabled'
+  | 'deviceTokenRef'
+  | 'dictationRouteContextRef'
+  | 'activeHandleRef'
+  | 'flushPendingLiveInputBeforeExternalSend'
+  | 'canSend'
+  | 'liveInputEnabled'
+  | 'showToast'
+  | 'resetLiveInputFocus'
+>
+type ProbeOptions = { client: FakeRpcClient; tab: MobileSessionTab; connState: ConnectionState }
+
+function agentTab(id: string): MobileSessionTab {
+  return {
+    id,
+    title: 'Chat',
+    type: 'agent-session',
+    sessionId: `session-${id}`,
+    agent: 'claude',
+    isActive: true
+  }
+}
 
 // Stable like the screen's useState setters, so the focus effect does not rerun on every render.
 const noop = (): void => {}
+let renderer: ReactTestRenderer | null = null
+let current: ReturnType<typeof useMobileSessionNativeChatDictation> | null = null
 
-type Mounted = { model: { current: Model | null }; switchChat: (tabId: string) => void }
-
-function mountAgentChatTab(client: FakeRpcClient): Mounted {
-  const latest: { current: Model | null } = { current: null }
-
-  function Probe({ tabId }: { tabId: string }): null {
-    const scope = {
-      hostId: 'h1',
-      worktreeId: 'w1',
-      client,
-      connState: 'connected',
-      agentSessionHostSupport: { promptCancel: true, questionAnswers: false },
-      setInput: () => {},
-      liveInputTerminalHandles: new Set<string>(),
+function Probe({ client, tab, connState }: ProbeOptions): null {
+  const scope: SessionScope = {
+    hostId: 'h1',
+    worktreeId: 'w1',
+    client,
+    connState,
+    agentSessionHostSupport: structuredAgentSessionHostSupport([]),
+    setInput: noop,
+    liveInputTerminalHandles: new Set<string>(),
+    activeHandle: null,
+    activeSessionTabId: tab.id,
+    activeSessionTab: tab,
+    diffComments: [],
+    diffCommentsRef: useRef([]),
+    setShowDictationSetup: noop,
+    setDictationMode: noop,
+    dictationEnabled: true,
+    setDictationEnabled: noop,
+    deviceTokenRef: useRef('dev'),
+    dictationRouteContextRef: useRef(null),
+    activeHandleRef: useRef(null),
+    flushPendingLiveInputBeforeExternalSend: async () => true,
+    canSend: resolveMobileTerminalInputGate({
+      connState,
       activeHandle: null,
-      activeSessionTabId: tabId,
-      activeSessionTab: { id: tabId, type: 'agent-session' },
-      diffComments: [],
-      diffCommentsRef: useRef([]),
-      setShowDictationSetup: () => {},
-      setDictationMode: noop,
-      dictationEnabled: true,
-      setDictationEnabled: noop,
-      deviceTokenRef: useRef('dev'),
-      dictationRouteContextRef: useRef(null),
-      activeHandleRef: useRef(null),
-      flushPendingLiveInputBeforeExternalSend: async () => true,
-      canSend: false,
-      liveInputEnabled: false,
-      showToast: () => {},
-      resetLiveInputFocus: () => {}
-    }
-    // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: the scope carries every member this hook destructures; the rest of the session model is unreachable from the mic path.
-    latest.current = useMobileSessionNativeChatDictation(scope as never, async () => true)
-    return null
+      activeSessionTabType: tab.type
+    }).canSend,
+    liveInputEnabled: false,
+    showToast: noop,
+    resetLiveInputFocus: noop
   }
-
-  let renderer: ReactTestRenderer | null = null
-  act(() => {
-    renderer = create(createElement(Probe, { tabId: 'chat1' }))
-  })
-  return {
-    model: latest,
-    switchChat: (tabId) => renderer!.update(createElement(Probe, { tabId }))
-  }
+  current = useMobileSessionNativeChatDictation(
+    // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: SessionScope checks every consumed field; the remaining session subsystems are unused by this hook.
+    scope as MobileSessionFeedbackCapabilitiesModel,
+    async () => true
+  )
+  return null
 }
 
-type Request = FakeRpcClient['requests'][number]
+function model(): NonNullable<typeof current> {
+  if (!current) {
+    throw new Error('Probe has not mounted')
+  }
+  return current
+}
 
-/**
- * Answers every request the hook sends, with `setup` as the desktop's voice settings. With
- * `heldFinishes`, a finish waits there instead, so the transcript can arrive late.
- */
-async function pump(
-  rpc: FakeRpcClient,
+async function render(options: ProbeOptions): Promise<void> {
+  await act(async () => {
+    const probe = createElement(Probe, options)
+    if (renderer) {
+      renderer.update(probe)
+    } else {
+      renderer = create(probe)
+    }
+  })
+}
+
+/** Answers the next request, which must be `method`. */
+async function reply(rpc: FakeRpcClient, method: string, result: unknown): Promise<SentRequest> {
+  await act(async () => {})
+  const request = rpc.requests.shift()
+  if (!request) {
+    throw new Error(`No request for ${method}`)
+  }
+  expect(request.method).toBe(method)
+  await act(async () => request.resolve({ id: 'desktop', ok: true, result }))
+  return request
+}
+
+const SETTING_ON = { autoSendAfterDictation: true, autoSendDelayMs: 3000 }
+
+/** Mounts an agent chat and answers the setup read the focused screen makes. */
+async function mountChat(
   setup: Record<string, unknown>,
-  heldFinishes?: Request[]
-): Promise<void> {
-  for (let round = 0; round < 10; round += 1) {
-    for (const request of rpc.requests.splice(0)) {
-      if (heldFinishes && request.method === 'speech.dictation.finish') {
-        heldFinishes.push(request)
-        continue
-      }
-      const result =
-        request.method === 'speech.models.list'
-          ? { enabled: true, dictationMode: 'toggle', models: [], ...setup }
-          : request.method === 'speech.dictation.start'
-            ? { dictationId: 'd1' }
-            : request.method === 'speech.dictation.finish'
-              ? { text: 'send this to the agent' }
-              : {}
-      request.resolve({ id: 'desktop', ok: true, result })
-    }
-    await Promise.resolve()
-    await Promise.resolve()
-  }
+  tab = agentTab('chat1')
+): Promise<{ rpc: FakeRpcClient; options: ProbeOptions }> {
+  const rpc = createFakeRpcClient()
+  const options: ProbeOptions = { client: rpc, tab, connState: 'connected' }
+  await render(options)
+  await reply(rpc, 'speech.models.list', {
+    enabled: true,
+    dictationMode: 'toggle',
+    models: [],
+    ...setup
+  })
+  return { rpc, options }
 }
 
-async function dictateIntoChat(setup: Record<string, unknown>): Promise<Model> {
-  const rpc = createFakeRpcClient()
-  const { model } = mountAgentChatTab(rpc)
-  await act(async () => pump(rpc, setup))
+/** Records, stops, and leaves the finish unanswered so the transcript can arrive later. */
+async function recordAndStop(rpc: FakeRpcClient): Promise<SentRequest> {
+  await act(async () => model().startDictation())
+  await reply(rpc, 'speech.dictation.start', { started: true })
   await act(async () => {
-    model.current!.startDictation()
-    await pump(rpc, setup)
+    void model().dictation.stop()
   })
-  await act(async () => {
-    void model.current!.dictation.stop()
-    await pump(rpc, setup)
-  })
-  return model.current!
+  await act(async () => {})
+  const finish = rpc.requests.shift()
+  if (!finish) {
+    throw new Error('No request for speech.dictation.finish')
+  }
+  expect(finish.method).toBe('speech.dictation.finish')
+  return finish
 }
+
+async function deliver(finish: SentRequest, text: string): Promise<void> {
+  await act(async () => finish.resolve({ id: 'desktop', ok: true, result: { text } }))
+}
+
+beforeEach(() => {
+  current = null
+  lifecycle.appStateListener = null
+  lifecycle.blur = null
+})
+afterEach(async () => {
+  current?.dictationAutoSend.withdraw()
+  await act(async () => renderer?.unmount())
+  renderer = null
+})
 
 describe('a chat transcript and the desktop auto-send setting', () => {
-  it('starts a countdown with the desktop delay when the setting is on', async () => {
-    const model = await dictateIntoChat({ autoSendAfterDictation: true, autoSendDelayMs: 3000 })
-    expect(model.dictationAutoSend.getSnapshot()).toMatchObject({ delayMs: 3000 })
-    act(() => model.dictationAutoSend.cancel())
+  it('appends the transcript and starts a countdown with the desktop delay', async () => {
+    const { rpc } = await mountChat(SETTING_ON)
+    await deliver(await recordAndStop(rpc), 'spoken words')
+
+    expect(model().nativeChatController.chatComposerText).toBe('Draft spoken words')
+    expect(model().dictationAutoSend.getSnapshot()).toMatchObject({ delayMs: 3000 })
+  })
+
+  it('appends the transcript without a countdown for a desktop that predates the setting', async () => {
+    const { rpc } = await mountChat({})
+    await deliver(await recordAndStop(rpc), 'spoken words')
+
+    expect(model().nativeChatController.chatComposerText).toBe('Draft spoken words')
+    expect(model().dictationAutoSend.getSnapshot()).toBeNull()
   })
 
   it('cancels the countdown when the user starts dictating again', async () => {
-    const model = await dictateIntoChat({ autoSendAfterDictation: true, autoSendDelayMs: 3000 })
-    act(() => model.startDictation())
-    expect(model.dictationAutoSend.getSnapshot()).toBeNull()
-  })
+    const { rpc } = await mountChat(SETTING_ON)
+    await deliver(await recordAndStop(rpc), 'spoken words')
 
-  it('starts nothing for a desktop that predates the setting', async () => {
-    const model = await dictateIntoChat({})
-    expect(model.dictationAutoSend.getSnapshot()).toBeNull()
+    await act(async () => model().startDictation())
+    expect(model().dictationAutoSend.getSnapshot()).toBeNull()
+    await reply(rpc, 'speech.dictation.start', { started: true })
   })
-
-  const setting = { autoSendAfterDictation: true, autoSendDelayMs: 3000 }
 
   it.each([
     ['the app goes to the background', () => lifecycle.appStateListener?.('background')],
-    ['the screen loses focus', () => lifecycle.blur?.()],
-    ['the user switches chats', (mounted: Mounted) => mounted.switchChat('chat2')]
+    ['the screen loses focus', () => lifecycle.blur?.()]
   ])('keeps a transcript that arrives after %s as a draft', async (_name, leave) => {
-    const rpc = createFakeRpcClient()
-    const mounted = mountAgentChatTab(rpc)
-    const heldFinishes: Request[] = []
-    await act(async () => pump(rpc, setting))
-    await act(async () => {
-      mounted.model.current!.startDictation()
-      await pump(rpc, setting)
-    })
-    await act(async () => {
-      void mounted.model.current!.dictation.stop()
-      await pump(rpc, setting, heldFinishes)
-    })
-    expect(heldFinishes).toHaveLength(1)
+    const { rpc } = await mountChat(SETTING_ON)
+    const finish = await recordAndStop(rpc)
 
-    act(() => leave(mounted))
-    await act(async () => {
-      heldFinishes[0].resolve({ id: 'desktop', ok: true, result: { text: 'too late to send' } })
-      await pump(rpc, setting)
-    })
+    act(() => leave())
+    await deliver(finish, 'late words')
 
-    expect(mounted.model.current!.dictationAutoSend.getSnapshot()).toBeNull()
+    expect(model().nativeChatController.chatComposerText).toBe('Draft late words')
+    expect(model().dictationAutoSend.getSnapshot()).toBeNull()
+  })
+
+  it('does not send a transcript that arrives after the user switched chats', async () => {
+    const { rpc, options } = await mountChat(SETTING_ON)
+    const finish = await recordAndStop(rpc)
+
+    await render({ ...options, tab: agentTab('chat2') })
+    await deliver(finish, 'late words')
+
+    expect(model().dictationAutoSend.getSnapshot()).toBeNull()
+  })
+
+  it('drops a running countdown when the connection drops, and a reconnect does not resume it', async () => {
+    const { rpc, options } = await mountChat(SETTING_ON)
+    await deliver(await recordAndStop(rpc), 'spoken words')
+    expect(model().dictationAutoSend.getSnapshot()).not.toBeNull()
+
+    await render({ ...options, connState: 'disconnected' })
+    expect(model().dictationAutoSend.getSnapshot()).toBeNull()
+
+    await render(options)
+    expect(model().dictationAutoSend.getSnapshot()).toBeNull()
+    expect(model().nativeChatController.chatComposerText).toBe('Draft spoken words')
+  })
+
+  it('auto-sends the next dictation after one was kept as a draft', async () => {
+    const { rpc } = await mountChat(SETTING_ON)
+    const finish = await recordAndStop(rpc)
+    act(() => lifecycle.appStateListener?.('background'))
+    await deliver(finish, 'kept')
+    expect(model().dictationAutoSend.getSnapshot()).toBeNull()
+
+    await deliver(await recordAndStop(rpc), 'sent')
+
+    expect(model().nativeChatController.chatComposerText).toBe('Draft kept sent')
+    expect(model().dictationAutoSend.getSnapshot()).toMatchObject({ delayMs: 3000 })
   })
 })

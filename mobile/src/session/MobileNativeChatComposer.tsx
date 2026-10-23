@@ -128,7 +128,11 @@ export function MobileNativeChatComposer({
   const files = structured?.files ?? NO_FILES
   const menu = useMobileNativeChatComposerMenu({
     value,
-    onChangeText,
+    // Why: typing and every menu pick edit through here; dictation writes the draft from above.
+    onChangeText: (next) => {
+      dictationAutoSend?.withdraw()
+      onChangeText(next)
+    },
     agent,
     structuredCatalog: structured?.catalog,
     filePaths,
@@ -255,10 +259,7 @@ export function MobileNativeChatComposer({
             ref={fieldRef}
             value={value}
             skillToken={menu.skillToken}
-            onChangeText={(next) => {
-              cancelAutoSend()
-              menu.onFieldChange(next)
-            }}
+            onChangeText={menu.onFieldChange}
             onFocus={() => {
               cancelAutoSend()
               setFocused(true)

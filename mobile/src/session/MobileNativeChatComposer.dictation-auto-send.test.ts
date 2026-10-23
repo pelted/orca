@@ -7,6 +7,7 @@ import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'rea
 import { AccessibilityInfo } from 'react-native'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MobileNativeChatComposer as NativeChatComposer } from './MobileNativeChatComposer'
+import { MobileNativeChatComposerMenu } from './MobileNativeChatComposerMenu'
 import {
   createMobileDictationAutoSend,
   type MobileDictationAutoSend
@@ -100,12 +101,16 @@ describe('MobileNativeChatComposer dictation auto-send', () => {
   }
 
   /** The composer with its draft owned by a parent, as the chat screen owns it. */
-  async function renderControlled(onSend: Overrides['onSend']): Promise<void> {
+  async function renderControlled(
+    onSend: Overrides['onSend'],
+    initialDraft = 'dictated words',
+    overrides: Overrides = {}
+  ): Promise<void> {
     function ControlledComposer(): React.JSX.Element {
-      const [value, setValue] = useState('dictated words')
+      const [value, setValue] = useState(initialDraft)
       return createElement(
         MobileNativeChatComposer,
-        props({ value, onChangeText: setValue, onSend })
+        props({ ...overrides, value, onChangeText: setValue, onSend })
       )
     }
     await act(async () => {
@@ -254,6 +259,24 @@ describe('MobileNativeChatComposer dictation auto-send', () => {
 
     expect(countdownText()).toBeNull()
     expect(onSend).toHaveBeenCalledTimes(sends)
+  })
+
+  it('does not count down a late transcript after a file suggestion is picked', async () => {
+    const onSend = vi.fn().mockResolvedValue(true)
+    await renderControlled(onSend, '@src', { filePaths: ['src/app.ts'] })
+    act(() => autoSend.arm())
+
+    await act(async () =>
+      field().props.onSelectionChange({ nativeEvent: { selection: { start: 4, end: 4 } } })
+    )
+    const menu = renderer!.root.findByType(MobileNativeChatComposerMenu)
+    await act(async () => menu.props.onPick(menu.props.rows[0]))
+    await act(async () => autoSend.startIfArmed(2000))
+    await advance(2000)
+
+    expect(field().props.value).toContain('src/app.ts')
+    expect(countdownText()).toBeNull()
+    expect(onSend).not.toHaveBeenCalled()
   })
 
   it('does not count down a late transcript after the composer went away', async () => {

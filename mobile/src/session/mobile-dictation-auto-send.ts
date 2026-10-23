@@ -107,8 +107,8 @@ const NO_SUBSCRIPTION = (): (() => void) => () => {}
 
 /**
  * The composer's view of the pending send: seconds left and the one-time announcement while it
- * counts down, nulls otherwise. Registers `send` as what the countdown fires, and cancels it when
- * the chat surface changes.
+ * counts down, nulls otherwise. Registers `send` as what the countdown fires, and withdraws it when
+ * the chat surface changes or the composer goes away.
  */
 export function useMobileDictationAutoSendCountdown(
   autoSend: MobileDictationAutoSend | null,
@@ -127,7 +127,7 @@ export function useMobileDictationAutoSendCountdown(
   }, [autoSend, send])
 
   // Why: a send must never land on a different chat than the one the words were dictated into.
-  useEffect(() => () => autoSend?.cancel(), [autoSend, sendSurfaceId])
+  useEffect(() => () => autoSend?.withdraw(), [autoSend, sendSurfaceId])
 
   useEffect(() => {
     if (!snapshot) {

@@ -237,4 +237,33 @@ describe('MobileNativeChatComposer dictation auto-send', () => {
 
     expect(onSend).not.toHaveBeenCalled()
   })
+
+  // The transcript is still on its way from the desktop: the dictation is armed, not counting yet.
+  it.each([
+    ['typing in the field', () => field().props.onChangeText('a correction'), 0],
+    ['tapping into the field', () => field().props.onFocus(), 0],
+    ['tapping Send', () => pressable('Send message').props.onPress(), 1]
+  ])('does not count down a late transcript after %s', async (_name, takeOver, sends) => {
+    const onSend = vi.fn().mockResolvedValue(true)
+    await renderControlled(onSend)
+    act(() => autoSend.arm())
+
+    await act(async () => takeOver())
+    await act(async () => autoSend.startIfArmed(2000))
+    await advance(2000)
+
+    expect(countdownText()).toBeNull()
+    expect(onSend).toHaveBeenCalledTimes(sends)
+  })
+
+  it('does not count down a late transcript after the composer went away', async () => {
+    await render()
+    act(() => autoSend.arm())
+    act(() => renderer?.unmount())
+    renderer = null
+
+    act(() => autoSend.startIfArmed(2000))
+
+    expect(autoSend.getSnapshot()).toBeNull()
+  })
 })

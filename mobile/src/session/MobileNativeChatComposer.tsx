@@ -208,7 +208,8 @@ export function MobileNativeChatComposer({
   }
   const { secondsLeft: autoSendSecondsLeft, announcement: autoSendAnnouncement } =
     useMobileDictationAutoSendCountdown(dictationAutoSend, sendSurfaceId, () => void handleSend())
-  const cancelAutoSend = (): void => dictationAutoSend?.cancel()
+  // Why: withdraw, not cancel, so a transcript still on its way stays a draft too.
+  const cancelAutoSend = (): void => dictationAutoSend?.withdraw()
 
   // A terminal-backed chat has only photos to add, so its + opens the library at once.
   const attachPress = structured ? () => setAttachOpen(true) : onAttachImage

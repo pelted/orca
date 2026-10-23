@@ -23,8 +23,13 @@ import { structuredAgentSessionHostSupport } from './mobile-structured-agent-ses
 type ScreenLifecycle = {
   appStateListener: ((state: string) => void) | null
   blur: (() => void) | null
+  chatViewTabs: Set<string>
 }
-const lifecycle = vi.hoisted((): ScreenLifecycle => ({ appStateListener: null, blur: null }))
+const lifecycle = vi.hoisted((): ScreenLifecycle => ({
+  appStateListener: null,
+  blur: null,
+  chatViewTabs: new Set()
+}))
 
 vi.mock('react-native', () => ({
   AppState: {
@@ -75,7 +80,7 @@ vi.mock('./use-mobile-native-chat-input-lease', () => ({
 vi.mock('./use-mobile-session-view-mode', () => ({
   useMobileSessionViewMode: () => ({
     ready: true,
-    isTabChatView: () => false,
+    isTabChatView: (tabId: string) => lifecycle.chatViewTabs.has(tabId),
     setTabView: () => {},
     toggleTabChatView: () => {}
   })
@@ -145,12 +150,24 @@ function agentTab(id: string): MobileSessionTab {
   }
 }
 
+/** A terminal running a chat-capable agent, so its view can switch between terminal and chat. */
+const terminalTab: MobileSessionTab = {
+  id: 'term1',
+  title: 'Terminal',
+  type: 'terminal',
+  terminal: 't1',
+  launchAgent: 'claude',
+  isActive: true
+}
+
 // Stable like the screen's useState setters, so the focus effect does not rerun on every render.
 const noop = (): void => {}
 let renderer: ReactTestRenderer | null = null
 let current: ReturnType<typeof useMobileSessionNativeChatDictation> | null = null
 
 function Probe({ client, tab, connState }: ProbeOptions): null {
+  const activeHandle = tab.type === 'terminal' ? tab.terminal : null
+  const activeHandleRef = useRef(activeHandle)
   const scope: SessionScope = {
     hostId: 'h1',
     worktreeId: 'w1',
@@ -159,7 +176,7 @@ function Probe({ client, tab, connState }: ProbeOptions): null {
     agentSessionHostSupport: structuredAgentSessionHostSupport([]),
     setInput: noop,
     liveInputTerminalHandles: new Set<string>(),
-    activeHandle: null,
+    activeHandle,
     activeSessionTabId: tab.id,
     activeSessionTab: tab,
     diffComments: [],
@@ -170,11 +187,11 @@ function Probe({ client, tab, connState }: ProbeOptions): null {
     setDictationEnabled: noop,
     deviceTokenRef: useRef('dev'),
     dictationRouteContextRef: useRef(null),
-    activeHandleRef: useRef(null),
+    activeHandleRef,
     flushPendingLiveInputBeforeExternalSend: async () => true,
     canSend: resolveMobileTerminalInputGate({
       connState,
-      activeHandle: null,
+      activeHandle,
       activeSessionTabType: tab.type
     }).canSend,
     liveInputEnabled: false,
@@ -262,6 +279,7 @@ beforeEach(() => {
   current = null
   lifecycle.appStateListener = null
   lifecycle.blur = null
+  lifecycle.chatViewTabs.clear()
 })
 afterEach(async () => {
   current?.dictationAutoSend.withdraw()
@@ -330,6 +348,35 @@ describe('a chat transcript and the desktop auto-send setting', () => {
     await render(options)
     expect(model().dictationAutoSend.getSnapshot()).toBeNull()
     expect(model().nativeChatController.chatComposerText).toBe('Draft spoken words')
+  })
+
+  it('never auto-sends a dictation started in terminal view, even if the tab switches to chat', async () => {
+    const { rpc, options } = await mountChat(SETTING_ON, terminalTab)
+    expect(model().nativeChatController.showNativeChat).toBe(false)
+    const finish = await recordAndStop(rpc)
+
+    lifecycle.chatViewTabs.add(terminalTab.id)
+    await render(options)
+    expect(model().nativeChatController.showNativeChat).toBe(true)
+    await deliver(finish, 'terminal words')
+
+    expect(model().dictationAutoSend.getSnapshot()).toBeNull()
+  })
+
+  it('withdraws when the tab leaves chat view while the transcript is on its way', async () => {
+    lifecycle.chatViewTabs.add(terminalTab.id)
+    const { rpc, options } = await mountChat(SETTING_ON, terminalTab)
+    expect(model().nativeChatController.showNativeChat).toBe(true)
+    const finish = await recordAndStop(rpc)
+
+    lifecycle.chatViewTabs.delete(terminalTab.id)
+    await render(options)
+    lifecycle.chatViewTabs.add(terminalTab.id)
+    await render(options)
+    await deliver(finish, 'late words')
+
+    expect(model().nativeChatController.chatComposerText).toBe('Draft late words')
+    expect(model().dictationAutoSend.getSnapshot()).toBeNull()
   })
 
   it('auto-sends the next dictation after one was kept as a draft', async () => {

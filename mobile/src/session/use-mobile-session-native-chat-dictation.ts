@@ -183,7 +183,10 @@ export function useMobileSessionNativeChatDictation(
   const startDictation = useCallback(() => {
     // Why: new speech appends to the same draft; its own transcript starts a fresh countdown.
     dictationAutoSend.withdraw()
-    dictationAutoSend.arm()
+    // Why: only dictation into the chat composer may send itself; terminal dictation never does.
+    if (showNativeChatRef.current) {
+      dictationAutoSend.arm()
+    }
     const routeContext = activeHandle
       ? { handle: activeHandle, liveInputEnabled: liveInputTerminalHandles.has(activeHandle) }
       : null
@@ -206,6 +209,10 @@ export function useMobileSessionNativeChatDictation(
   useEffect(() => {
     dictationAutoSend.withdraw()
   }, [dictationAutoSend, nativeChatScopeKey])
+
+  useEffect(() => {
+    dictationAutoSend.withdraw()
+  }, [dictationAutoSend, showNativeChat])
 
   // Why: dictation stops when the connection drops, so a reconnect must not resume its send.
   useEffect(() => {

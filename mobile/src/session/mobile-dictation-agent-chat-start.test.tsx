@@ -137,7 +137,6 @@ let terminalText = ''
 function Probe({ client, tab, connState, dictationEnabled }: ProbeOptions): null {
   const activeHandle = tab.type === 'terminal' ? tab.terminal : null
   const activeHandleRef = useRef(activeHandle)
-  activeHandleRef.current = activeHandle
   const scope: SessionScope = {
     hostId: 'h1',
     worktreeId: 'w1',
@@ -249,7 +248,7 @@ describe('dictation uses the active composer readiness', () => {
       connState: 'connected',
       dictationEnabled: true
     }
-  ] satisfies Array<Omit<ProbeOptions, 'client'> & { name: string }>)(
+  ] satisfies (Omit<ProbeOptions, 'client'> & { name: string })[])(
     'does not open the mic for $name',
     async (options) => {
       const client = createFakeRpcClient()

@@ -120,7 +120,6 @@ export function useMobileSessionNativeChatDictation(
     [setShowDictationSetup, showToast]
   )
 
-  // Why: a chat transcript lands in the chat composer, so an agent chat tab needs no terminal handle.
   const dictationTargetReady = showNativeChat ? connState === 'connected' : canSend
   const dictation = useMobileDictation({
     client,

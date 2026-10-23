@@ -15,7 +15,7 @@ import { showDictationStartErrorToast } from './dictation-start-error-toast'
 import { useHoldDictationGesture } from './use-hold-dictation-gesture'
 import { DICTATION_CONTROL_EVENT, type DictationControlAction } from './dictation-control-events'
 import { publishDictationMeter } from './dictation-meter-store'
-import { useDictationAutoSend } from './use-dictation-auto-send'
+import { useDictationAutoSend, type DictationSessionOutcome } from './use-dictation-auto-send'
 
 export function DictationController() {
   const dictationState = useAppStore((s) => s.dictationState)
@@ -49,7 +49,7 @@ export function DictationController() {
   // not once per press, while the selected mic stays gone.
   const micFallbackNotifiedForRef = useRef<string | null>(null)
   const stopDictationRef = useRef<(() => void) | null>(null)
-  const { trackInsertion, startAfterSession: startAutoSend } = useDictationAutoSend()
+  const { trackInsertion, startWhenStopping: startAutoSend } = useDictationAutoSend()
 
   const drainStoppedSession = useCallback((sessionId: string) => {
     void waitForStoppedSession(sessionId, stoppedSessionIdsRef, stoppedResolversRef)
@@ -59,6 +59,9 @@ export function DictationController() {
     async (sessionId: string) => {
       dictationStateRef.current = 'stopping'
       setDictationState('stopping')
+      // Why: a user who takes over while the final transcript is still coming keeps their draft.
+      const outcome = Promise.withResolvers<DictationSessionOutcome>()
+      startAutoSend(insertionTargetRef.current, outcome.promise)
       stopCapture()
       try {
         await window.api.speech.stopDictation(sessionId)
@@ -70,11 +73,10 @@ export function DictationController() {
       // event so old finals cannot be mistaken for the next dictation run.
       await waitForStoppedSession(sessionId, stoppedSessionIdsRef, stoppedResolversRef)
       const sessionErrored = erroredSessionIdsRef.current.delete(sessionId)
-      const finishedSession = {
+      outcome.resolve({
         finalTranscriptReceived: finalTranscriptReceivedRef.current,
-        sessionErrored,
-        target: insertionTargetRef.current
-      }
+        sessionErrored
+      })
       if (!sessionErrored && !finalTranscriptReceivedRef.current && getCapturedChunkCount() > 0) {
         toast.message(
           translate(
@@ -94,7 +96,6 @@ export function DictationController() {
       dictationStateRef.current = 'idle'
       setDictationState('idle')
       setPartialTranscript('')
-      startAutoSend(finishedSession)
     },
     [setDictationState, setPartialTranscript, stopCapture, getCapturedChunkCount, startAutoSend]
   )

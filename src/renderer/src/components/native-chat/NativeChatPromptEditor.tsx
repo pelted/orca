@@ -48,7 +48,6 @@ type Props = Omit<HTMLAttributes<HTMLDivElement>, 'onChange' | 'onSelect'> & {
   inputRef: RefObject<NativeChatComposerInput | null>
   initialValue: string
   disabled: boolean
-  /** Lets dictation send this editor's message when it ends. */
   dictationAutoSend?: boolean
   placeholder: string
   onChange: (input: NativeChatComposerInput) => void
